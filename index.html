@@ -48,7 +48,7 @@ const CONFIG = {
     "¡Gracias por tu cariño y por acompañarnos en este momento tan especial!"
   ],
 
-  regalosIntro: "Gracias por acompañarnos en este momento tan especial. Aquí encontrarás ideas de regalos esenciales para recibir a nuestro bebé y acompañarlo en su primer año. Marca el regalo que llevarás para evitar repetidos.",
+  regalosIntro: "Gracias por acompañarnos en este momento tan especial. Aquí encontrarás ideas de regalos esenciales para recibir a nuestro bebé y acompañarlo en su primer año. Marca el regalo que llevarás: los que ya eligió otra persona aparecen tachados para evitar repetidos.",
   regalosNota: "Tallas sugeridas: RN a 12 meses. Las cantidades son sugeridas.",
   regalos: [
     { grupo: "Lo esencial para el día a día", sub: "Ropa, pañales e higiene para los primeros meses", categorias: [
@@ -135,6 +135,13 @@ const CONFIG = {
         ["Comida casera para los papás","Para los primeros días","x1"],
         ["Tarjeta con deseos para el bebé","Para guardar en su álbum","x1"] ] } ] }
   ],
+
+  // ── REGALOS TACHADOS PARA TODOS ──
+  // Pega aquí la URL de tu base de datos gratuita de Firebase (ver guía). Con esto, cuando alguien elige un regalo,
+  // se tacha para todos los invitados que abran el link después. Si lo dejas vacío, solo se tacha en el celular de cada persona.
+  registroUrl: "",                     // ej: "https://baby-jared-default-rtdb.firebaseio.com"
+  // Opcional: regalos que ya te confirmaron por WhatsApp antes de activar esto (escribe el nombre tal cual aparece en la lista)
+  yaTomados: [],                       // ej: ["Cochecito", "Cuna o cuna-corral"]
 
   musica: "cancion.mp3",             // archivo de audio, en la misma carpeta que index.html
 
@@ -373,7 +380,14 @@ section{position:relative;padding:0 34px}
 .gl-box svg{width:18px;height:18px;opacity:0;transform:scale(.4);transition:all .18s}
 .gl-item[aria-checked="true"] .gl-box{background:var(--orange);border-color:#a8631a;transform:rotate(-6deg)}
 .gl-item[aria-checked="true"] .gl-box svg{opacity:1;transform:none;color:#fff}
-.gl-item[aria-checked="true"] .gl-n{text-decoration:line-through;text-decoration-color:rgba(29,63,124,.5)}
+.gl-item[aria-checked="true"] .gl-t,.gl-item.tomado .gl-t{text-decoration:line-through;text-decoration-thickness:2px;text-decoration-color:var(--navy)}
+.gl-item.tomado{opacity:.5;cursor:not-allowed}
+.gl-item.tomado .gl-box{background:#e9e2c6;border-color:#b9ad7d;transform:none}
+.gl-item.tomado .gl-q{background:#8a93a8}
+.gl-tag{display:block;font-size:12px;font-weight:600;color:#a8631a;margin-top:1px}
+.gl-tag:empty{display:none}
+.gl-est{text-align:center;font-size:12.5px;font-weight:600;color:#a8631a;margin:6px 0 0}
+.gl-est:empty{display:none}
 .gl-n{font-weight:600;font-size:15.5px;line-height:1.25}
 .gl-d{display:block;font-size:13px;opacity:.78;font-weight:400}
 .gl-q{font-family:var(--display);font-size:13px;color:#fff;background:var(--navy);border-radius:999px;padding:3px 10px;min-width:42px;text-align:center}
@@ -600,6 +614,7 @@ section{position:relative;padding:0 34px}
     <button class="x" id="glX" type="button" aria-label="Cerrar">×</button>
     <h3 class="bubble" id="glTitulo">Lista de regalos</h3>
     <p class="intro" id="glIntro"></p>
+    <p class="gl-est" id="glEst" role="status"></p>
     <div class="fld">
       <label for="glNombre">Tu nombre</label>
       <input type="text" id="glNombre" placeholder="Ej. Familia Rojas" autocomplete="name">
@@ -877,35 +892,109 @@ var IMGS = {
   $("#btnCopiar").addEventListener("click",function(){if(!falta())copiar(mensaje())});
 
   /* ── Lista de regalos ── */
-  var gsheet=$("#giftSheet"),glFocus=null,marcados={};
-  try{marcados=JSON.parse(localStorage.getItem("gohan-regalos")||"{}")||{}}catch(e){marcados={}}
-  function guardarMarcas(){try{localStorage.setItem("gohan-regalos",JSON.stringify(marcados))}catch(e){}}
+  var gsheet=$("#giftSheet"),glFocus=null,marcados={},tomados={},fijos={},idsLista={},glTimer=null,reclamando=false,conectado=false,viejas=null,uid="";
+  /* identificador anónimo de este celular, para saber cuáles regalos son "míos" */
+  try{uid=localStorage.getItem("gohan-uid")||"";if(!uid){uid=Math.random().toString(36).slice(2)+Date.now().toString(36);localStorage.setItem("gohan-uid",uid)}}catch(e){uid=uid||Math.random().toString(36).slice(2)}
+  try{marcados=JSON.parse(localStorage.getItem("gohan-regalos-v2")||"{}")||{}}catch(e){marcados={}}
+  try{viejas=JSON.parse(localStorage.getItem("gohan-regalos")||"null")}catch(e){viejas=null}   /* marcas de la versión anterior */
+  function guardarMarcas(){try{localStorage.setItem("gohan-regalos-v2",JSON.stringify(marcados))}catch(e){}}
+  function clave(t){return (t||"").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g,"").replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"")||"item"}
+
+  /* registro compartido (Firebase Realtime Database, por REST) */
+  function base(){return (cfg.registroUrl||"").trim().replace(/\/+$/,"")}
+  function api(ruta,opc){
+    return fetch(base()+"/regalos"+ruta+".json",Object.assign({cache:"no-store"},opc||{})).then(function(r){if(!r.ok)throw new Error("HTTP "+r.status);return r.json()});
+  }
+  function estado(t){$("#glEst").textContent=t||""}
+  function ocupado(id){return !!fijos[id]||!!(tomados[id]&&tomados[id].u!==uid)}
+  function cargarTomados(){
+    if(!base()){pintar();return Promise.resolve()}
+    return api("").then(function(d){tomados=d||{};conectado=true;estado("")})
+      .catch(function(){conectado=false;estado("No pudimos revisar los regalos ya elegidos. Revisa tu conexión.")})
+      .then(function(){reclamarPendientes();pintar();glUpdate()});
+  }
+  /* intenta quedarse con el regalo; devuelve true si quedó a mi nombre */
+  function reclamar(id){
+    if(!base())return Promise.resolve(true);
+    return api("/"+id).then(function(cur){
+      if(cur&&cur.u&&cur.u!==uid)return false;
+      return api("/"+id,{method:"PUT",body:JSON.stringify({u:uid,t:Date.now()})})
+        .then(function(){return api("/"+id)})
+        .then(function(v){return !!v&&v.u===uid});
+    });
+  }
+  function liberar(id){
+    delete tomados[id];
+    if(!base())return;
+    api("/"+id).then(function(cur){if(cur&&cur.u===uid)return api("/"+id,{method:"DELETE"})}).catch(function(){});
+  }
+  /* sube mis marcas que aún no están en el registro (por ejemplo, si estaba sin internet) */
+  function reclamarPendientes(){
+    if(reclamando||!base()||!conectado)return;
+    Object.keys(tomados).forEach(function(id){if(tomados[id]&&tomados[id].u===uid&&!marcados[id])liberar(id)});
+    var pend=Object.keys(marcados).filter(function(id){return idsLista[id]&&!(tomados[id]&&tomados[id].u===uid)});
+    if(!pend.length)return;
+    reclamando=true;
+    (function sig(i){
+      if(i>=pend.length){reclamando=false;pintar();glUpdate();return}
+      var id=pend[i];
+      reclamar(id).then(function(ok){
+        if(ok)tomados[id]={u:uid,t:Date.now()};
+        else{delete marcados[id];guardarMarcas();toast("Un regalo que habías marcado ya lo eligió otra persona.")}
+      }).catch(function(){}).then(function(){sig(i+1)});
+    })(0);
+  }
+
+  /* pinta el estado de cada regalo: mío (marcado y tachado), de otra persona (tachado y bloqueado) o libre */
+  function pintar(){
+    [].forEach.call(document.querySelectorAll(".gl-item"),function(b){
+      var id=b.dataset.id,mio=!!marcados[id],otro=!mio&&ocupado(id);
+      b.setAttribute("aria-checked",mio);
+      b.setAttribute("aria-disabled",otro);
+      b.classList.toggle("tomado",otro);
+      b.querySelector(".gl-tag").textContent=mio?"Tu elección · toca para quitarla":(otro?"Ya lo llevará otra persona":"");
+    });
+  }
+  function alternar(b){
+    var id=b.dataset.id;
+    if(marcados[id]){delete marcados[id];guardarMarcas();pintar();glUpdate();liberar(id);return}
+    if(ocupado(id)){toast("Ese regalo ya lo eligió otra persona. Elige otro, por favor.");return}
+    marcados[id]=1;guardarMarcas();pintar();glUpdate();
+    reclamar(id).then(function(ok){
+      if(ok){tomados[id]={u:uid,t:Date.now()}}
+      else{delete marcados[id];guardarMarcas();toast("Justo lo acaban de elegir. Elige otro, por favor.");cargarTomados()}
+      pintar();glUpdate();
+    }).catch(function(){conectado=false;toast("Sin conexión: tu elección quedó guardada solo en este celular.")});
+  }
+
   function buildGifts(){
     $("#glIntro").textContent=cfg.regalosIntro;$("#glNota").textContent=cfg.regalosNota;
-    var h="";
+    var h="",usados={},ya={};
+    (cfg.yaTomados||[]).forEach(function(n){ya[clave(n)]=1});
+    fijos={};idsLista={};
     cfg.regalos.forEach(function(g,gi){
       h+='<h4 class="gl-grupo">'+esc(g.grupo)+'</h4><p class="gl-sub">'+esc(g.sub)+'</p>';
       g.categorias.forEach(function(c,ci){
         h+='<div class="gl-cat">'+esc(c.nombre)+'</div>';
         c.items.forEach(function(it,ii){
-          var id=gi+"-"+ci+"-"+ii;
-          h+='<button type="button" class="gl-item" role="checkbox" aria-checked="'+(!!marcados[id])+'" data-id="'+id+'" data-n="'+esc(it[0])+'">'+
+          var k=clave(it[0]),id=k;
+          if(usados[id]){var n=2;while(usados[k+"-"+n])n++;id=k+"-"+n}
+          usados[id]=1;idsLista[id]=1;
+          if(ya[k])fijos[id]=1;
+          if(viejas&&viejas[gi+"-"+ci+"-"+ii])marcados[id]=1;
+          h+='<button type="button" class="gl-item" role="checkbox" aria-checked="false" data-id="'+id+'" data-n="'+esc(it[0])+'">'+
              '<span class="gl-box"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>'+
-             '<span class="gl-n">'+esc(it[0])+'<span class="gl-d">'+esc(it[1])+'</span></span><span class="gl-q">'+esc(it[2])+'</span></button>';
+             '<span class="gl-n"><span class="gl-t">'+esc(it[0])+'</span><span class="gl-d">'+esc(it[1])+'</span><span class="gl-tag"></span></span><span class="gl-q">'+esc(it[2])+'</span></button>';
         });
       });
     });
+    if(viejas){viejas=null;guardarMarcas();try{localStorage.removeItem("gohan-regalos")}catch(e){}}
     $("#glLista").innerHTML=h;
-    [].forEach.call(document.querySelectorAll(".gl-item"),function(b){
-      b.addEventListener("click",function(){
-        var id=b.dataset.id;if(marcados[id])delete marcados[id];else marcados[id]=1;
-        b.setAttribute("aria-checked",!!marcados[id]);guardarMarcas();glUpdate();
-      });
-    });
-    glUpdate();
+    [].forEach.call(document.querySelectorAll(".gl-item"),function(b){b.addEventListener("click",function(){alternar(b)})});
+    pintar();glUpdate();
   }
   function glSeleccion(){
-    return [].filter.call(document.querySelectorAll(".gl-item"),function(b){return b.getAttribute("aria-checked")==="true"}).map(function(b){return b.dataset.n});
+    return [].filter.call(document.querySelectorAll(".gl-item"),function(b){return !!marcados[b.dataset.id]}).map(function(b){return b.dataset.n});
   }
   function glMensaje(para,sel){
     var nom=$("#glNombre").value.trim(),to=para?primero(para==="papa"?cfg.papa:cfg.mama):"";
@@ -924,8 +1013,9 @@ var IMGS = {
   }
   function abrirRegalos(){
     glFocus=document.activeElement;gsheet.hidden=false;document.body.style.overflow="hidden";glUpdate();
+    cargarTomados();clearInterval(glTimer);glTimer=setInterval(cargarTomados,15000);
   }
-  function cerrarRegalos(){gsheet.hidden=true;document.body.style.overflow="";if(glFocus)glFocus.focus()}
+  function cerrarRegalos(){clearInterval(glTimer);gsheet.hidden=true;document.body.style.overflow="";if(glFocus)glFocus.focus()}
   $("#glX").addEventListener("click",cerrarRegalos);$("#glBd").addEventListener("click",cerrarRegalos);
   $("#glNombre").addEventListener("input",glUpdate);
   ["#glPapa","#glMama"].forEach(function(id){$(id).addEventListener("click",function(e){
@@ -974,7 +1064,8 @@ var IMGS = {
   $("#edReset").addEventListener("click",function(){cfg=JSON.parse(JSON.stringify(CONFIG));buildEditor();render()});
   window.addEventListener("hashchange",modoEditor);
 
-  render();modoEditor();
+  render();modoEditor();cargarTomados();
+  document.addEventListener("visibilitychange",function(){if(!document.hidden&&!gsheet.hidden)cargarTomados()});
   /* en modo edición se abre directo, sin sobre */
   if(ruta()){$("#env").click()}
 })();
